@@ -31,3 +31,6 @@ build
 
 #general
 *.class
+
+#wikipedia data
+src/main/resources/*
