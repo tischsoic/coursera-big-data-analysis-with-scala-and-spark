@@ -5,7 +5,6 @@ import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import annotation.tailrec
-import scala.reflect.ClassTag
 
 /** A raw stackoverflow posting, either a question or an answer */
 case class Posting(postingType: Int, id: Int, acceptedAnswer: Option[Int], parentId: Option[QID], score: Int, tags: Option[String]) extends Serializable
@@ -14,7 +13,7 @@ case class Posting(postingType: Int, id: Int, acceptedAnswer: Option[Int], paren
 /** The main class */
 object StackOverflow extends StackOverflow {
 
-  @transient lazy val conf: SparkConf = new SparkConf().setMaster("local").setAppName("StackOverflow")
+  @transient lazy val conf: SparkConf = new SparkConf().setMaster("local").setAppName("StackOverflow").set("spark.driver.bindAddress", "localhost")
   @transient lazy val sc: SparkContext = new SparkContext(conf)
 
   /** Main function */
@@ -77,7 +76,10 @@ class StackOverflow extends StackOverflowInterface with Serializable {
 
   /** Group the questions and answers together */
   def groupedPostings(postings: RDD[Posting]): RDD[(QID, Iterable[(Question, Answer)])] = {
-    ???
+    val questions: RDD[(QID, Question)] = postings.filter(_.postingType == 1).map(q => (q.id, q))
+    val answers: RDD[(QID, Answer)] = postings.filter(_.postingType == 2).map(a => (a.parentId.get, a))
+    val questionsAnswers: RDD[(QID, (Question, Answer))] = questions.join(answers)
+    questionsAnswers.groupByKey
   }
 
 
@@ -96,7 +98,9 @@ class StackOverflow extends StackOverflowInterface with Serializable {
       highScore
     }
 
-    ???
+    grouped
+      .filter(_._2.nonEmpty)
+      .map({ case (_, i) => (i.head._1, answerHighScore(i.map(_._2).toArray))})
   }
 
 
@@ -116,7 +120,11 @@ class StackOverflow extends StackOverflowInterface with Serializable {
       }
     }
 
-    ???
+    scored
+      .map({ case (question, highScore) =>
+        (firstLangInTag(question.tags, langs).getOrElse(-1) * langSpread, highScore)
+      })
+      .filter(_._1 >= 0).cache()
   }
 
 
@@ -171,9 +179,9 @@ class StackOverflow extends StackOverflowInterface with Serializable {
 
   /** Main kmeans computation */
   @tailrec final def kmeans(means: Array[(Int, Int)], vectors: RDD[(Int, Int)], iter: Int = 1, debug: Boolean = false): Array[(Int, Int)] = {
-    val newMeans = means.clone() // you need to compute newMeans
+    val newMeansMap = vectors.keyBy(findClosest(_, means)).groupByKey.mapValues(averageVectors).collectAsMap
+    val newMeans = means.zipWithIndex.map({ case (v, idx) => newMeansMap.getOrElse(idx, v) })
 
-    // TODO: Fill in the newMeans array
     val distance = euclideanDistance(means, newMeans)
 
     if (debug) {
@@ -273,11 +281,17 @@ class StackOverflow extends StackOverflowInterface with Serializable {
     val closest = vectors.map(p => (findClosest(p, means), p))
     val closestGrouped = closest.groupByKey()
 
-    val median = closestGrouped.mapValues { vs =>
-      val langLabel: String   = ??? // most common language in the cluster
-      val langPercent: Double = ??? // percent of the questions in the most common language
-      val clusterSize: Int    = ???
-      val medianScore: Int    = ???
+    val median = closestGrouped.mapValues { vs: Iterable[(LangIndex, HighScore)] =>
+      val mostPopularLangIndex = vs.map(_._1).groupBy(identity).mapValues(_.size).maxBy(_._2)._1
+      val langLabel: String   = langs(mostPopularLangIndex / langSpread) // most common language in the cluster
+      val langPercent: Double = vs.count(_._1 == mostPopularLangIndex) * 100 / vs.size // percent of the questions in the most common language
+      val clusterSize: Int    = vs.size
+      val sortedHighScores = vs.map(_._2).toList.sorted
+      val medianScore: Int    = if (sortedHighScores.size % 2 == 1) {
+        sortedHighScores(sortedHighScores.size / 2)
+      } else {
+        (sortedHighScores(sortedHighScores.size / 2 - 1) + sortedHighScores(sortedHighScores.size / 2)) / 2
+      }
 
       (langLabel, langPercent, clusterSize, medianScore)
     }
