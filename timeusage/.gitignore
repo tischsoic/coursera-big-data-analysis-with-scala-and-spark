@@ -31,3 +31,6 @@ build
 
 #general
 *.class
+
+# data
+src/main/resources/timeusage/atussum.csv
